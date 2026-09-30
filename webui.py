@@ -259,6 +259,115 @@ with shared.gradio_root:
                         with gr.Row():
                             with gr.Column():
                                 inpaint_input_image = grh.Image(label='Image', source='upload', type='numpy', tool='sketch', height=500, brush_color="#FFFFFF", elem_id='inpaint_canvas', show_label=False)
+
+                                with gr.Accordion(label='👕 Auto & Interactive Clothing Masking (SAM)', open=False):
+                                    with gr.Group():
+                                        with gr.Row():
+                                            auto_cloth_btn = gr.Button(value="👕 Auto Mask Clothes", variant="secondary")
+                                            clear_clicks_btn = gr.Button(value="🧹 Clear Clicks", variant="secondary")
+                                        tool_mode = gr.Radio(label="Interactive Selection Mode", choices=["➕ Add Point (In)", "➖ Remove Point (Out)"], value="➕ Add Point (In)")
+                                        clicks_status = gr.Markdown(value="*No points selected. Click on the image to select clothes or use Auto Mask.*")
+                                        click_points_state = gr.State([])
+                                        click_labels_state = gr.State([])
+                                        base_image_state = gr.State(None)
+
+                                    def handle_image_click(evt: gr.SelectData, image_data, points, labels, mode, base_img):
+                                        if image_data is None:
+                                            return gr.update(), points, labels, "⚠️ Please upload an image first.", base_img
+                                        if isinstance(image_data, dict):
+                                            img = image_data['image']
+                                        else:
+                                            img = image_data
+                                        if img is None:
+                                            return gr.update(), points, labels, "⚠️ Please upload an image first.", base_img
+                                        
+                                        x, y = evt.index
+                                        points.append([x, y])
+                                        label = 1 if "Add" in mode else 0
+                                        labels.append(label)
+                                        
+                                        if len(points) <= 1:
+                                            base_img = img.copy()
+                                        elif base_img is None:
+                                            base_img = img.copy()
+                                        
+                                        from segment_anything import sam_model_registry
+                                        from segment_anything.predictor import SamPredictor
+                                        import torch
+                                        import numpy as np
+                                        import modules.config
+                                        
+                                        try:
+                                            sam_checkpoint = modules.config.download_sam_model('vit_b')
+                                            sam = sam_model_registry['vit_b'](checkpoint=sam_checkpoint)
+                                            device = "cuda" if torch.cuda.is_available() else "cpu"
+                                            sam.to(device=device)
+                                            sam_predictor = SamPredictor(sam)
+                                            sam_predictor.set_image(base_img)
+                                            
+                                            masks, scores, logits = sam_predictor.predict(
+                                                point_coords=np.array(points),
+                                                point_labels=np.array(labels),
+                                                multimask_output=False
+                                            )
+                                            best_mask = masks[0]
+                                            H, W = best_mask.shape
+                                            mask_np = np.zeros((H, W, 3), dtype=np.uint8)
+                                            mask_np[best_mask] = [255, 255, 255]
+                                            
+                                            pos_count = sum(1 for l in labels if l == 1)
+                                            neg_count = sum(1 for l in labels if l == 0)
+                                            status = f"📍 Click recorded at [{x}, {y}]. Clicks: **{pos_count}** In, **{neg_count}** Out. Mask updated!"
+                                            return {"image": base_img, "mask": mask_np}, points, labels, status, base_img
+                                        except Exception as e:
+                                            status = f"❌ Error running SAM: {str(e)}"
+                                            return gr.update(), points, labels, status, base_img
+
+                                    def auto_mask_clothes_clicked(image_data, base_img):
+                                        if image_data is None:
+                                            return gr.update(), [], [], "⚠️ Please upload an image first.", base_img
+                                        if isinstance(image_data, dict):
+                                            img = image_data['image']
+                                        else:
+                                            img = image_data
+                                        if img is None:
+                                            return gr.update(), [], [], "⚠️ Please upload an image first.", base_img
+                                        
+                                        base_img = img.copy()
+                                            
+                                        from extras.inpaint_mask import generate_mask_from_image, SAMOptions
+                                        try:
+                                            sam_opts = SAMOptions(
+                                                dino_prompt="clothes, clothing, shirt, pants, dress, jacket, coat, skirt, sweater, apparel, trousers, suit, t-shirt, jeans, top, outwear",
+                                                dino_box_threshold=0.25,
+                                                dino_text_threshold=0.25,
+                                                model_type='vit_b'
+                                            )
+                                            mask_image, _, _, _ = generate_mask_from_image(base_img, mask_model='sam', sam_options=sam_opts)
+                                            if mask_image is None:
+                                                return gr.update(), [], [], "❌ Could not detect any clothing on the image.", base_img
+                                            status = "👕 Automatically selected all clothes! Click on the image to refine (Add/Remove points)."
+                                            return {"image": base_img, "mask": mask_image}, [], [], status, base_img
+                                        except Exception as e:
+                                            status = f"❌ Error running clothing segmentation: {str(e)}"
+                                            return gr.update(), [], [], status, base_img
+
+                                    def clear_clicks_clicked(image_data, base_img):
+                                        if base_img is None and image_data is not None:
+                                            if isinstance(image_data, dict):
+                                                base_img = image_data['image']
+                                            else:
+                                                base_img = image_data
+                                        if base_img is not None:
+                                            H, W = base_img.shape[:2]
+                                            empty_mask = np.zeros((H, W, 3), dtype=np.uint8)
+                                            return {"image": base_img, "mask": empty_mask}, [], [], "🧹 Clicks cleared and mask reset.", base_img
+                                        return gr.update(), [], [], "🧹 Clicks cleared.", base_img
+
+                                    inpaint_input_image.select(handle_image_click, inputs=[inpaint_input_image, click_points_state, click_labels_state, tool_mode, base_image_state], outputs=[inpaint_input_image, click_points_state, click_labels_state, clicks_status, base_image_state], queue=True)
+                                    auto_cloth_btn.click(auto_mask_clothes_clicked, inputs=[inpaint_input_image, base_image_state], outputs=[inpaint_input_image, click_points_state, click_labels_state, clicks_status, base_image_state], queue=True)
+                                    clear_clicks_btn.click(clear_clicks_clicked, inputs=[inpaint_input_image, base_image_state], outputs=[inpaint_input_image, click_points_state, click_labels_state, clicks_status, base_image_state], queue=True)
+
                                 inpaint_advanced_masking_checkbox = gr.Checkbox(label='Enable Advanced Masking Features', value=modules.config.default_inpaint_advanced_masking_checkbox)
                                 inpaint_mode = gr.Dropdown(choices=modules.flags.inpaint_options, value=modules.config.default_inpaint_method, label='Method')
                                 inpaint_additional_prompt = gr.Textbox(placeholder="Describe what you want to inpaint.", elem_id='inpaint_additional_prompt', label='Inpaint Additional Prompt', visible=False)
@@ -685,6 +794,16 @@ with shared.gradio_root:
 
                 with gr.Row():
                     refresh_files = gr.Button(label='Refresh', value='\U0001f504 Refresh All Files', variant='secondary', elem_classes='refresh_button')
+
+                with gr.Accordion(label='📥 Download Models (Civitai, Hugging Face, etc.)', open=False):
+                    with gr.Group():
+                        dl_url = gr.Textbox(label='Model URL', placeholder='Paste Civitai, Hugging Face, or direct download link here...', max_lines=1)
+                        with gr.Row():
+                            dl_type = gr.Radio(label='Model Type', choices=['Checkpoint', 'LoRA', 'VAE', 'Embedding'], value='Checkpoint')
+                            dl_name = gr.Textbox(label='Custom Filename (Optional)', placeholder='e.g., my_model', max_lines=1)
+                        dl_button = gr.Button(value='Download & Load Model', variant='primary')
+                        dl_status = gr.Markdown(value='*Ready to download.*')
+
             with gr.Tab(label='Advanced'):
                 guidance_scale = gr.Slider(label='Guidance Scale', minimum=1.0, maximum=30.0, step=0.01,
                                            value=modules.config.default_cfg_scale,
@@ -886,6 +1005,91 @@ with shared.gradio_root:
                 refresh_files.click(refresh_files_clicked, [], refresh_files_output + lora_ctrls,
                                     queue=False, show_progress=False)
 
+                def download_model_clicked(url, model_type, custom_filename):
+                    if not url or not url.strip():
+                        yield ["⚠️ **Please enter a valid URL first.**"] + [gr.update() for _ in range(len(refresh_files_output) + len(lora_ctrls))]
+                        return
+
+                    url = url.strip()
+                    num_other_outputs = len(refresh_files_output) + len(lora_ctrls)
+                    
+                    import urllib.request
+                    import urllib.parse
+                    import re
+
+                    # Map type to directory
+                    if model_type == 'Checkpoint':
+                        dest_dir = modules.config.paths_checkpoints[0]
+                    elif model_type == 'LoRA':
+                        dest_dir = modules.config.paths_loras[0]
+                    elif model_type == 'VAE':
+                        dest_dir = modules.config.path_vae
+                    elif model_type == 'Embedding':
+                        dest_dir = modules.config.path_embeddings
+                    else:
+                        dest_dir = modules.config.paths_checkpoints[0]
+
+                    try:
+                        req = urllib.request.Request(
+                            url, 
+                            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'}
+                        )
+                        with urllib.request.urlopen(req) as response:
+                            content_disposition = response.info().get('Content-Disposition')
+                            filename = None
+                            if content_disposition:
+                                matches = re.findall(r'filename\*?=(?:utf-8\'\')?([^;\n]+)', content_disposition)
+                                if matches:
+                                    filename = urllib.parse.unquote(matches[0].strip('"\''))
+                            
+                            if not filename:
+                                parsed_url = urllib.parse.urlparse(url)
+                                filename = os.path.basename(parsed_url.path)
+                                
+                            if not filename or filename == '' or '.' not in filename:
+                                filename = filename or "model"
+                                if not filename.endswith(".safetensors"):
+                                    filename += ".safetensors"
+                                
+                            if custom_filename and custom_filename.strip():
+                                custom_filename = custom_filename.strip()
+                                ext = os.path.splitext(filename)[1]
+                                if not custom_filename.endswith(ext) and ext:
+                                    filename = custom_filename + ext
+                                else:
+                                    filename = custom_filename
+                            
+                            filename = re.sub(r'[\\/*?:"<>|]', "", filename)
+                            dest_path = os.path.join(dest_dir, filename)
+                            os.makedirs(dest_dir, exist_ok=True)
+                            
+                            total_size = int(response.info().get('Content-Length', 0))
+                            
+                            yield [f"📥 Starting download of **{filename}**..."] + [gr.update() for _ in range(num_other_outputs)]
+                            
+                            chunk_size = 1024 * 1024  # 1MB chunks
+                            downloaded = 0
+                            with open(dest_path, 'wb') as f:
+                                while True:
+                                    chunk = response.read(chunk_size)
+                                    if not chunk:
+                                        break
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                                    if total_size > 0:
+                                        percent = (downloaded / total_size) * 100
+                                        yield [f"📥 Downloading **{filename}**: {percent:.1f}% ({downloaded / (1024*1024):.1f} / {total_size / (1024*1024):.1f} MB)"] + [gr.update() for _ in range(num_other_outputs)]
+                                    else:
+                                        yield [f"📥 Downloading **{filename}**: {downloaded / (1024*1024):.1f} MB (unknown total size)"] + [gr.update() for _ in range(num_other_outputs)]
+                                        
+                            modules.config.update_files()
+                            refreshed = refresh_files_clicked()
+                            yield [f"✔️ **Success!** Downloaded **{filename}** and loaded without restart."] + refreshed
+                    except Exception as e:
+                        yield [f"❌ **Error downloading model:** {str(e)}"] + [gr.update() for _ in range(num_other_outputs)]
+
+                dl_button.click(download_model_clicked, inputs=[dl_url, dl_type, dl_name], outputs=[dl_status] + refresh_files_output + lora_ctrls, queue=True)
+
         state_is_generating = gr.State(False)
 
         load_data_outputs = [advanced_checkbox, image_number, prompt, negative_prompt, style_selections,
@@ -909,9 +1113,26 @@ with shared.gradio_root:
                 lora_downloads = preset_prepared.get('lora_downloads', {})
                 vae_downloads = preset_prepared.get('vae_downloads', {})
 
-                preset_prepared['base_model'], preset_prepared['checkpoint_downloads'] = launch.download_models(
-                    default_model, previous_default_models, checkpoint_downloads, embeddings_downloads, lora_downloads,
-                    vae_downloads)
+                from modules.util import get_file_from_folder_list
+                import os
+
+                # Avoid downloading models when changing presets
+                if not os.path.isfile(get_file_from_folder_list(default_model, modules.config.paths_checkpoints)):
+                    fallback_found = False
+                    for alternative_model_name in previous_default_models:
+                        if os.path.isfile(get_file_from_folder_list(alternative_model_name, modules.config.paths_checkpoints)):
+                            preset_prepared['base_model'] = alternative_model_name
+                            fallback_found = True
+                            break
+                    if not fallback_found:
+                        if len(modules.config.model_filenames) > 0:
+                            preset_prepared['base_model'] = modules.config.model_filenames[0]
+                        else:
+                            preset_prepared['base_model'] = default_model
+                else:
+                    preset_prepared['base_model'] = default_model
+
+                preset_prepared['checkpoint_downloads'] = {}
 
                 if 'prompt' in preset_prepared and preset_prepared.get('prompt') == '':
                     del preset_prepared['prompt']
